@@ -1,0 +1,98 @@
+name: Build and Release Android App
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and CMake
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1" "platforms;android-36" "build-tools;36.0.0" || true
+          
+          # AndroidIDE compatibility: link cmake 3.22.1 to 4.1.2
+          CMAKE_BASE="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmake"
+          if [ -d "$CMAKE_BASE/3.22.1" ]; then
+            ln -sf "$CMAKE_BASE/3.22.1" "$CMAKE_BASE/4.1.2"
+          fi
+
+      - name: Make Gradlew Executable
+        run: chmod +x gradlew
+
+      - name: Build Debug & Release APK
+        run: |
+          ./gradlew assembleDebug assembleRelease --stacktrace
+
+      - name: Sign Release APK
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d ${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/* | sort -V | tail -n 1)
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+          
+          if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            echo "Generating release keystore..."
+            keytool -genkeypair -v -keystore release.jks -alias mykey -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Myeiwema, OU=Android, O=Myeiwema, L=City, ST=State, C=CN"
+            
+            echo "Signing release APK..."
+            "$APKSIGNER" sign --ks release.jks --ks-pass pass:password123 --key-pass pass:password123 --out app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/app-release-unsigned.apk
+            
+            rm -f app/build/outputs/apk/release/app-release-unsigned.apk
+          fi
+
+      - name: Upload APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Myeiwema-APKs
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+
+      - name: Determine Release Tag
+        id: release_tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+            echo "RELEASE_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+          else
+            TAG="v1.0.${{ github.run_number }}"
+            echo "TAG_NAME=$TAG" >> $GITHUB_ENV
+            echo "RELEASE_NAME=Release $TAG" >> $GITHUB_ENV
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.RELEASE_NAME }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
